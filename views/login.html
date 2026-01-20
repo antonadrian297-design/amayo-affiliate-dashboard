@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AMAYO – Login afiliat</title>
+  <style>
+    :root { --gold:#D4AF37; --cream:#FAF9F6; --ink:#111; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0b0b; color:#fff; display:flex; min-height:100vh; align-items:center; justify-content:center; margin:0; }
+    .card { width:min(420px, 92vw); background:#141414; border:1px solid rgba(212,175,55,.35); border-radius:18px; padding:24px; box-shadow:0 18px 50px rgba(0,0,0,.45); }
+    h1 { margin:0 0 8px; font-size:22px; letter-spacing:.2px; }
+    p { margin:0 0 18px; color:rgba(255,255,255,.75); font-size:14px; }
+    label { display:block; margin:12px 0 6px; font-size:14px; color:rgba(255,255,255,.85); }
+    input { width:100%; padding:12px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0f0f0f; color:#fff; font-size:15px; }
+    .btn { margin-top:16px; width:100%; padding:12px 14px; border-radius:999px; border:1px solid var(--gold); background:var(--gold); color:#111; font-weight:700; font-size:16px; cursor:pointer; }
+    .err { margin-top:12px; background:rgba(255,60,60,.12); border:1px solid rgba(255,60,60,.35); color:#ffd6d6; padding:10px 12px; border-radius:12px; font-size:14px; }
+    .brand { color:var(--gold); font-weight:800; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="brand">AMAYO</span> – Dashboard afiliat</h1>
+    <p>Autentificare cu email și parolă.</p>
+
+    <form method="POST" action="/login">
+      <label>Email</label>
+      <input name="email" type="email" placeholder="ex: afiliat@email.ro" required />
+
+      <label>Parolă</label>
+      <input name="password" type="password" placeholder="••••••••" required />
+
+      <button class="btn" type="submit">Intră în dashboard</button>
+    </form>
+
+    {{ERROR}}
+  </div>
+
+  <script>
+    (function(){
+      const err = "{{ERROR}}";
+      if (err && err.trim().length > 0) {
+        const div = document.createElement("div");
+        div.className = "err";
+        div.textContent = err;
+        document.querySelector(".card").appendChild(div);
+      }
+    })();
+  </script>
+</body>
+</html>
