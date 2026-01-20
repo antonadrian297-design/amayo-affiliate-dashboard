@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AMAYO – Dashboard afiliat</title>
+  <style>
+    :root { --gold:#D4AF37; --cream:#FAF9F6; --bg:#0b0b0b; --card:#141414; --muted:rgba(255,255,255,.65); }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:#fff; margin:0; }
+    .wrap { max-width:1100px; margin:0 auto; padding:18px; }
+    .top { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .brand { color:var(--gold); font-weight:900; letter-spacing:.3px; }
+    .pill { border:1px solid rgba(212,175,55,.35); background:rgba(212,175,55,.08); padding:8px 12px; border-radius:999px; color:var(--cream); }
+    .card { margin-top:14px; background:var(--card); border:1px solid rgba(255,255,255,.08); border-radius:18px; padding:16px; box-shadow:0 18px 50px rgba(0,0,0,.45); }
+    .grid { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:12px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    .kpi { background:#101010; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:14px; }
+    .kpi .t { color:var(--muted); font-size:13px; }
+    .kpi .v { font-size:22px; font-weight:900; margin-top:4px; }
+    .btn { border-radius:999px; padding:10px 14px; border:1px solid rgba(255,255,255,.15); background:#0f0f0f; color:#fff; cursor:pointer; font-weight:700; }
+    .btn.gold { background:var(--gold); color:#111; border-color:var(--gold); }
+    .muted { color:var(--muted); }
+    table { width:100%; border-collapse:collapse; margin-top:10px; }
+    th, td { padding:10px 8px; border-bottom:1px solid rgba(255,255,255,.08); text-align:left; vertical-align:top; font-size:14px; }
+    th { color:rgba(255,255,255,.85); font-weight:800; }
+    .badge { display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; font-weight:800; }
+    .badge.ok { background:rgba(46,204,113,.12); border:1px solid rgba(46,204,113,.35); color:#d7ffe8; }
+    .badge.no { background:rgba(255,60,60,.12); border:1px solid rgba(255,60,60,.35); color:#ffd6d6; }
+    .actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    a.link { color:var(--cream); text-decoration:none; border-bottom:1px dotted rgba(250,249,246,.45); }
+    .small { font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div class="brand">AMAYO</div>
+        <div class="muted small">Dashboard afiliat • Cod: <b>{{CODE}}</b> • Perioadă: ultimele <b>{{DAYS}}</b> zile</div>
+      </div>
+
+      <div class="actions">
+        <a class="btn" href="/export.csv?days={{DAYS}}">Export CSV</a>
+        <a class="btn gold" href="/dashboard?days=14">14 zile</a>
+        <a class="btn" href="/dashboard?days=30">30 zile</a>
+        <a class="btn" href="/dashboard?days=60">60 zile</a>
+
+        <form method="POST" action="/logout" style="margin:0;">
+          <button class="btn" type="submit">Logout</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <div class="kpi">
+          <div class="t">Comenzi găsite</div>
+          <div class="v">{{ORDERS_COUNT}}</div>
+          <div class="muted small">Conțin codul <b>{{CODE}}</b></div>
+        </div>
+
+        <div class="kpi">
+          <div class="t">Venit total (după reducere)</div>
+          <div class="v">{{TOTAL_REVENUE}}</div>
+          <div class="muted small">Totalul final plătit de client</div>
+        </div>
+
+        <div class="kpi">
+          <div class="t">Comision eligibil (10%)</div>
+          <div class="v">{{TOTAL_COMMISSION}}</div>
+          <div class="muted small">Eligibil = status executat (fulfilled)</div>
+        </div>
+      </div>
+
+      <div class="muted small" style="margin-top:12px;">
+        Reguli: comision doar pentru comenzi <b>executate</b> (fulfilled). Comenzi anulate sau rambursate sunt excluse.
+      </div>
+
+      <div style="overflow:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Comandă</th>
+              <th>Dată</th>
+              <th>Client</th>
+              <th>Total</th>
+              <th>Comision</th>
+              <th>Eligibil</th>
+              <th>Fulfillment</th>
+              <th>Plată</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ROWS}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
