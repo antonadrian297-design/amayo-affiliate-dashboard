@@ -314,11 +314,6 @@ app.get("/login", (req, res) => {
         <button type="submit">Intră</button>
         ${error}
       </form>
-
-      <div class="muted" style="margin-top:14px;">
-        <b>Admin:</b> ${escapeHtml(ADMIN_USER)} / (parola din ENV) <br/>
-        <b>Afiliat:</b> ${escapeHtml(AFFILIATE_USER)} / (parola din ENV)
-      </div>
       `
     )
   );
