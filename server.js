@@ -14,19 +14,29 @@ app.use(express.json());
  * =========================
  * CONFIG (ENV)
  * =========================
- * Pe Render -> Environment:
+ * Render -> Environment:
+ *  - SESSION_SECRET = ceva-lung
+ *
+ *  - ADMIN_USER = amayo
+ *  - ADMIN_PASS = amayoadmin
+ *
  *  - AFFILIATE_USER = sorinamincu
  *  - AFFILIATE_PASS = amayoSorina
  *  - AFFILIATE_MATCH = stiudelasorina
- *  - COMMISSION_RATE = 0.10  (ex: 10%)  (opțional)
- *  - SESSION_SECRET = ceva-lung
+ *
+ *  - COMMISSION_RATE = 0.10 (optional)
  */
+
+const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-in-render";
+
+const ADMIN_USER = String(process.env.ADMIN_USER || "amayo").trim();
+const ADMIN_PASS = String(process.env.ADMIN_PASS || "amayoadmin").trim();
 
 const AFFILIATE_USER = String(process.env.AFFILIATE_USER || "sorinamincu").trim();
 const AFFILIATE_PASS = String(process.env.AFFILIATE_PASS || "amayoSorina").trim();
 const AFFILIATE_MATCH = String(process.env.AFFILIATE_MATCH || "stiudelasorina").trim().toLowerCase();
-const COMMISSION_RATE = Number(process.env.COMMISSION_RATE || "0.10"); // 10% default
-const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-in-render";
+
+const COMMISSION_RATE = Number(process.env.COMMISSION_RATE || "0.10");
 
 /**
  * =========================
@@ -41,24 +51,19 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: false, // Render termină SSL la edge; dacă vrei strict, pune true + trust proxy
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 zile
+      secure: false,
+      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
     },
   })
 );
 
-// Dacă vrei cookie secure pe Render, poți activa asta:
-// app.set("trust proxy", 1);
-
 /**
  * =========================
- * STORAGE: CSV parsed in memory + persist to /tmp
- * Render: /tmp e efemer, dar persistă cât timp rulează instanța.
+ * STORAGE: orders cache
  * =========================
  */
 const DATA_FILE = path.join("/tmp", "orders_cache.json");
-
-let orders = []; // array of normalized order rows
+let orders = [];
 
 function loadOrdersFromDisk() {
   try {
@@ -84,26 +89,39 @@ loadOrdersFromDisk();
 
 /**
  * =========================
+ * PASSWORD HASH CACHE
+ * =========================
+ */
+async function hashPass(pass) {
+  const salt = await bcrypt.genSalt(10);
+  return bcrypt.hash(pass, salt);
+}
+
+let adminHashPromise = null;
+let affiliateHashPromise = null;
+
+function getAdminHash() {
+  if (!adminHashPromise) adminHashPromise = hashPass(ADMIN_PASS);
+  return adminHashPromise;
+}
+function getAffiliateHash() {
+  if (!affiliateHashPromise) affiliateHashPromise = hashPass(AFFILIATE_PASS);
+  return affiliateHashPromise;
+}
+
+/**
+ * =========================
  * AUTH HELPERS
  * =========================
  */
-async function ensurePassHash() {
-  // Pentru simplitate: la runtime generăm hash pentru parola din ENV
-  // (nu îl salvăm; îl recalculăm la restart). E ok pentru 1 user.
-  const salt = await bcrypt.genSalt(10);
-  const hash = await bcrypt.hash(AFFILIATE_PASS, salt);
-  return hash;
-}
-
-let cachedHashPromise = null;
-function getAffiliateHash() {
-  if (!cachedHashPromise) cachedHashPromise = ensurePassHash();
-  return cachedHashPromise;
-}
-
 function requireAuth(req, res, next) {
-  if (req.session && req.session.user === AFFILIATE_USER) return next();
+  if (req.session?.role) return next();
   return res.redirect("/login");
+}
+
+function requireAdmin(req, res, next) {
+  if (req.session?.role === "admin") return next();
+  return res.status(403).send("Forbidden");
 }
 
 /**
@@ -113,12 +131,12 @@ function requireAuth(req, res, next) {
  */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 /**
  * =========================
- * UTIL: column detection & normalization
+ * UTIL
  * =========================
  */
 function normalizeKey(k) {
@@ -139,16 +157,12 @@ function pickFirstExistingKey(obj, candidates) {
 }
 
 function parseMoney(value) {
-  // Acceptă "123.45", "123,45", "RON 123.45", etc.
   const s = String(value ?? "").trim();
   if (!s) return 0;
-  // scoate orice non-digit, non-separator
   const cleaned = s.replace(/[^\d,.\-]/g, "");
-  // dacă are virgulă și nu are punct -> consideră virgulă zecimală
   if (cleaned.includes(",") && !cleaned.includes(".")) {
     return Number(cleaned.replace(",", ".")) || 0;
   }
-  // dacă are și virgulă și punct, de obicei virgula e separator de mii -> o scoatem
   if (cleaned.includes(",") && cleaned.includes(".")) {
     return Number(cleaned.replace(/,/g, "")) || 0;
   }
@@ -158,11 +172,9 @@ function parseMoney(value) {
 function parseDate(value) {
   const s = String(value ?? "").trim();
   if (!s) return null;
-  // Shopify export are de obicei: "2026-01-21 10:30:00 +0200" sau ISO
   const d = new Date(s);
   if (!isNaN(d.getTime())) return d;
 
-  // fallback: încearcă doar YYYY-MM-DD
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) {
     const dd = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
@@ -172,7 +184,6 @@ function parseDate(value) {
 }
 
 function rowMatchesAffiliate(row) {
-  // Căutăm codul de reducere în coloane tipice Shopify
   const discountKey = pickFirstExistingKey(row, [
     "discount code",
     "discount_code",
@@ -187,7 +198,6 @@ function rowMatchesAffiliate(row) {
     return v.includes(AFFILIATE_MATCH);
   }
 
-  // fallback: caută peste tot
   const hay = Object.values(row)
     .map((v) => String(v || "").toLowerCase())
     .join(" | ");
@@ -195,7 +205,6 @@ function rowMatchesAffiliate(row) {
 }
 
 function normalizeOrderRow(row) {
-  // Detectăm câmpuri standard din export
   const createdAtKey = pickFirstExistingKey(row, ["created at", "created_at", "created date", "date"]);
   const nameKey = pickFirstExistingKey(row, ["name", "order", "order name", "order_number", "order number"]);
   const totalKey = pickFirstExistingKey(row, [
@@ -206,12 +215,7 @@ function normalizeOrderRow(row) {
     "current total price",
     "current_total_price",
   ]);
-  const financialKey = pickFirstExistingKey(row, [
-    "financial status",
-    "financial_status",
-    "payment status",
-    "paid",
-  ]);
+  const financialKey = pickFirstExistingKey(row, ["financial status", "financial_status", "payment status", "paid"]);
   const discountKey = pickFirstExistingKey(row, [
     "discount code",
     "discount_code",
@@ -234,11 +238,15 @@ function normalizeOrderRow(row) {
   };
 }
 
-/**
- * =========================
- * PAGES (simple HTML)
- * =========================
- */
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function pageLayout(title, bodyHtml) {
   return `<!doctype html>
 <html lang="ro">
@@ -258,7 +266,6 @@ function pageLayout(title, bodyHtml) {
     .topbar { display:flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
     .pill { display:inline-block; padding: 4px 10px; border:1px solid #ddd; border-radius: 999px; font-size: 12px; }
     .danger { color: #b00020; }
-    .ok { color: #0b6b0b; }
     .summary { display:flex; gap: 16px; flex-wrap: wrap; margin-top: 14px; }
     .card { border: 1px solid #eee; border-radius: 10px; padding: 12px 14px; min-width: 220px; }
     .card h3 { margin: 0 0 6px; font-size: 14px; color:#333; }
@@ -280,38 +287,41 @@ function pageLayout(title, bodyHtml) {
  * =========================
  */
 app.get("/", (req, res) => {
-  if (req.session?.user === AFFILIATE_USER) return res.redirect("/dashboard");
+  if (req.session?.role) return res.redirect("/dashboard");
   return res.redirect("/login");
 });
 
 app.get("/login", (req, res) => {
   const error = req.query.error ? `<div class="danger" style="margin-top:10px;">Email sau parolă greșită</div>` : "";
-  const html = pageLayout(
-    "Login afiliat",
-    `
-    <div class="topbar">
-      <h2>Login afiliat</h2>
-      <span class="pill">AMAYO</span>
-    </div>
+  res.send(
+    pageLayout(
+      "Login",
+      `
+      <div class="topbar">
+        <h2>Login</h2>
+        <span class="pill">AMAYO</span>
+      </div>
 
-    <form method="POST" action="/login">
-      <div style="margin-bottom:10px;">
-        <div class="muted">Email</div>
-        <input name="email" type="text" style="width: 420px;" autocomplete="username" required />
+      <form method="POST" action="/login">
+        <div style="margin-bottom:10px;">
+          <div class="muted">Email</div>
+          <input name="email" type="text" style="width: 420px;" autocomplete="username" required />
+        </div>
+        <div style="margin-bottom:10px;">
+          <div class="muted">Parolă</div>
+          <input name="password" type="password" style="width: 420px;" autocomplete="current-password" required />
+        </div>
+        <button type="submit">Intră</button>
+        ${error}
+      </form>
+
+      <div class="muted" style="margin-top:14px;">
+        <b>Admin:</b> ${escapeHtml(ADMIN_USER)} / (parola din ENV) <br/>
+        <b>Afiliat:</b> ${escapeHtml(AFFILIATE_USER)} / (parola din ENV)
       </div>
-      <div style="margin-bottom:10px;">
-        <div class="muted">Parolă</div>
-        <input name="password" type="password" style="width: 420px;" autocomplete="current-password" required />
-      </div>
-      <button type="submit">Intră</button>
-      ${error}
-      <div class="muted" style="margin-top:12px;">
-        (User setat din Render ENV: <b>AFFILIATE_USER</b> / <b>AFFILIATE_PASS</b>)
-      </div>
-    </form>
-    `
+      `
+    )
   );
-  res.send(html);
 });
 
 app.post("/login", async (req, res) => {
@@ -319,14 +329,23 @@ app.post("/login", async (req, res) => {
     const email = String(req.body.email || "").trim();
     const password = String(req.body.password || "");
 
-    if (email !== AFFILIATE_USER) return res.redirect("/login?error=1");
+    if (email === ADMIN_USER) {
+      const ok = await bcrypt.compare(password, await getAdminHash());
+      if (!ok) return res.redirect("/login?error=1");
+      req.session.role = "admin";
+      req.session.user = ADMIN_USER;
+      return res.redirect("/dashboard");
+    }
 
-    const hash = await getAffiliateHash();
-    const ok = await bcrypt.compare(password, hash);
-    if (!ok) return res.redirect("/login?error=1");
+    if (email === AFFILIATE_USER) {
+      const ok = await bcrypt.compare(password, await getAffiliateHash());
+      if (!ok) return res.redirect("/login?error=1");
+      req.session.role = "affiliate";
+      req.session.user = AFFILIATE_USER;
+      return res.redirect("/dashboard");
+    }
 
-    req.session.user = AFFILIATE_USER;
-    return res.redirect("/dashboard");
+    return res.redirect("/login?error=1");
   } catch (e) {
     console.error(e);
     return res.redirect("/login?error=1");
@@ -338,21 +357,24 @@ app.get("/logout", (req, res) => {
 });
 
 app.get("/dashboard", requireAuth, (req, res) => {
-  // filters
-  const from = String(req.query.from || "").trim(); // YYYY-MM-DD
-  const to = String(req.query.to || "").trim();     // YYYY-MM-DD
+  const from = String(req.query.from || "").trim();
+  const to = String(req.query.to || "").trim();
 
   const fromDate = from ? new Date(`${from}T00:00:00Z`) : null;
   const toDate = to ? new Date(`${to}T23:59:59Z`) : null;
 
+  const isAdmin = req.session.role === "admin";
+  const canUpload = isAdmin;
+
   const filtered = orders
     .filter((o) => {
-      // affiliate match
-      const rawRow = o.raw || {};
-      if (!rowMatchesAffiliate(rawRow)) return false;
+      // affiliate vede DOAR comenzile cu codul
+      if (!isAdmin) {
+        if (!rowMatchesAffiliate(o.raw || {})) return false;
+      }
 
-      // date filter
-      if (!o.createdAtISO) return true; // dacă nu avem dată, o lăsăm
+      // date filter (ambele roluri)
+      if (!o.createdAtISO) return true;
       const d = new Date(o.createdAtISO);
       if (fromDate && d < fromDate) return false;
       if (toDate && d > toDate) return false;
@@ -364,12 +386,13 @@ app.get("/dashboard", requireAuth, (req, res) => {
       return db - da;
     });
 
+  // sumar:
   const totalOrders = filtered.length;
   const totalRevenue = filtered.reduce((s, o) => s + (o.total || 0), 0);
   const totalCommission = totalRevenue * (isFinite(COMMISSION_RATE) ? COMMISSION_RATE : 0);
 
   const rowsHtml = filtered
-    .slice(0, 500) // limit
+    .slice(0, 500)
     .map((o) => {
       const dateStr = o.createdAtISO ? new Date(o.createdAtISO).toLocaleString("ro-RO") : "";
       const totalStr = (o.total || 0).toFixed(2);
@@ -383,92 +406,105 @@ app.get("/dashboard", requireAuth, (req, res) => {
     })
     .join("");
 
-  const html = pageLayout(
-    "Dashboard afiliat",
+  // bloc upload doar pentru admin:
+  const uploadBlock = canUpload
+    ? `
+      <hr style="margin:18px 0;"/>
+      <h3>Încarcă CSV (export Shopify Orders)</h3>
+      <form method="POST" action="/upload" enctype="multipart/form-data" class="row">
+        <input type="file" name="csvfile" accept=".csv" required />
+        <button type="submit">Upload</button>
+        <span class="muted">Se salvează pe server (în /tmp cât timp rulează instanța)</span>
+      </form>
+
+      <div class="muted" style="margin-top:10px;">
+        Total rânduri încărcate în sistem: <b>${orders.length}</b>
+      </div>
     `
-    <div class="topbar">
-      <div>
-        <h2 style="margin:0;">Dashboard afiliat</h2>
-        <div class="muted">Filtrat strict pe cod reducere: <b>${escapeHtml(AFFILIATE_MATCH)}</b></div>
+    : `
+      <hr style="margin:18px 0;"/>
+      <div class="muted">
+        CSV-ul este încărcat de admin. Dacă nu vezi comenzi, așteaptă următorul import.
       </div>
-      <div class="row">
-        <a class="btnlink" href="/logout">Logout</a>
-      </div>
-    </div>
+    `;
 
-    <form method="GET" action="/dashboard" class="row">
-      <div>
-        <div class="muted">De la (YYYY-MM-DD)</div>
-        <input name="from" value="${escapeHtml(from)}" placeholder="2026-01-01" />
-      </div>
-      <div>
-        <div class="muted">Până la (YYYY-MM-DD)</div>
-        <input name="to" value="${escapeHtml(to)}" placeholder="2026-01-31" />
-      </div>
-      <div>
-        <button type="submit">Aplică filtru</button>
-      </div>
-    </form>
+  const titleLine = isAdmin
+    ? `<div class="muted">Rol: <b>Admin</b> (vezi toate comenzile din CSV)</div>`
+    : `<div class="muted">Rol: <b>Afiliat</b> — Filtrat strict pe cod reducere: <b>${escapeHtml(
+        AFFILIATE_MATCH
+      )}</b></div>`;
 
-    <div class="summary">
-      <div class="card">
-        <h3>Comenzi</h3>
-        <div class="value">${totalOrders}</div>
+  res.send(
+    pageLayout(
+      "Dashboard",
+      `
+      <div class="topbar">
+        <div>
+          <h2 style="margin:0;">Dashboard</h2>
+          ${titleLine}
+        </div>
+        <div class="row">
+          <a class="btnlink" href="/logout">Logout</a>
+        </div>
       </div>
-      <div class="card">
-        <h3>Total vânzări (din CSV)</h3>
-        <div class="value">${totalRevenue.toFixed(2)}</div>
+
+      <form method="GET" action="/dashboard" class="row">
+        <div>
+          <div class="muted">De la (YYYY-MM-DD)</div>
+          <input name="from" value="${escapeHtml(from)}" placeholder="2026-01-01" />
+        </div>
+        <div>
+          <div class="muted">Până la (YYYY-MM-DD)</div>
+          <input name="to" value="${escapeHtml(to)}" placeholder="2026-01-31" />
+        </div>
+        <div>
+          <button type="submit">Aplică filtru</button>
+        </div>
+      </form>
+
+      <div class="summary">
+        <div class="card">
+          <h3>Comenzi</h3>
+          <div class="value">${totalOrders}</div>
+        </div>
+        <div class="card">
+          <h3>Total vânzări (din CSV)</h3>
+          <div class="value">${totalRevenue.toFixed(2)}</div>
+        </div>
+        <div class="card">
+          <h3>Comision (${Math.round(COMMISSION_RATE * 100)}%)</h3>
+          <div class="value">${totalCommission.toFixed(2)}</div>
+        </div>
       </div>
-      <div class="card">
-        <h3>Comision (${Math.round(COMMISSION_RATE * 100)}%)</h3>
-        <div class="value">${totalCommission.toFixed(2)}</div>
-      </div>
-    </div>
 
-    <hr style="margin:18px 0;"/>
+      ${uploadBlock}
 
-    <h3>Încarcă CSV (export Shopify Orders)</h3>
-    <form method="POST" action="/upload" enctype="multipart/form-data" class="row">
-      <input type="file" name="csvfile" accept=".csv" required />
-      <button type="submit">Upload</button>
-      <span class="muted">Se salvează pe server (în /tmp cât timp rulează instanța)</span>
-    </form>
-
-    <div class="muted" style="margin-top:10px;">
-      Total rânduri încărcate în sistem: <b>${orders.length}</b>
-    </div>
-
-    <h3 style="margin-top:18px;">Comenzi (max 500 afișate)</h3>
-    <table>
-      <thead>
-        <tr>
-          <th>Order</th>
-          <th>Created</th>
-          <th>Status</th>
-          <th>Discount</th>
-          <th>Total</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rowsHtml || `<tr><td colspan="5" class="muted">Nu există comenzi pentru criteriile selectate.</td></tr>`}
-      </tbody>
-    </table>
-
-    <div class="muted" style="margin-top:10px;">
-      Dacă nu vezi comenzi, trimite-mi prima linie din CSV (header) și îți mapăm exact coloana de discount.
-    </div>
-    `
+      <h3 style="margin-top:18px;">Comenzi (max 500 afișate)</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Order</th>
+            <th>Created</th>
+            <th>Status</th>
+            <th>Discount</th>
+            <th>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml || `<tr><td colspan="5" class="muted">Nu există comenzi pentru criteriile selectate.</td></tr>`}
+        </tbody>
+      </table>
+      `
+    )
   );
-
-  res.send(html);
 });
 
-app.post("/upload", requireAuth, upload.single("csvfile"), (req, res) => {
+// Upload route — doar admin
+app.post("/upload", requireAdmin, upload.single("csvfile"), (req, res) => {
   try {
     if (!req.file) return res.redirect("/dashboard");
 
     const csvText = req.file.buffer.toString("utf8");
-
     const records = parse(csvText, {
       columns: true,
       skip_empty_lines: true,
@@ -476,12 +512,8 @@ app.post("/upload", requireAuth, upload.single("csvfile"), (req, res) => {
       bom: true,
     });
 
-    const normalized = records.map(normalizeOrderRow);
-
-    // Înlocuim tot setul (mai simplu) — dacă vrei “append”, îți fac imediat
-    orders = normalized;
+    orders = records.map(normalizeOrderRow);
     saveOrdersToDisk();
-
     return res.redirect("/dashboard");
   } catch (e) {
     console.error("Upload failed:", e);
@@ -489,26 +521,5 @@ app.post("/upload", requireAuth, upload.single("csvfile"), (req, res) => {
   }
 });
 
-/**
- * =========================
- * SAFE HTML
- * =========================
- */
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-/**
- * =========================
- * START
- * =========================
- */
 const PORT = Number(process.env.PORT || 10000);
-app.listen(PORT, () => {
-  console.log(`Server running on ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
