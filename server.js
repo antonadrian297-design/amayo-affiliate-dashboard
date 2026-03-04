@@ -4,6 +4,7 @@ const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const fs = require("fs");
 const { parse } = require("csv-parse/sync");
+const { Pool } = require("pg");
 
 const app = express();
 const upload = multer({ dest: "/tmp" });
@@ -38,8 +39,37 @@ const USERS = {
   },
 };
 
-/* ================= STORAGE (in-memory) ================= */
-let ORDERS = [];
+/* ================= POSTGRES ================= */
+function mustEnv(name) {
+  if (!process.env[name]) throw new Error(`Missing env: ${name}`);
+}
+
+mustEnv("DATABASE_URL");
+
+// Render Postgres usually requires SSL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id SERIAL PRIMARY KEY,
+      order_name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NULL,
+      financial_status TEXT NULL,
+      discount_code TEXT NULL,
+      total NUMERIC(12,2) NOT NULL DEFAULT 0,
+      source_hash TEXT NOT NULL UNIQUE,
+      inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  // Indexuri utile la filtrare
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_discount ON orders (discount_code);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_created ON orders (created_at);`);
+}
 
 /* ================= HELPERS ================= */
 
@@ -333,41 +363,78 @@ app.get("/logout", (req, res) => {
 
 /* ================= DASHBOARD ================= */
 
-app.get("/dashboard", requireAuth, (req, res) => {
+app.get("/dashboard", requireAuth, async (req, res) => {
   const user = req.session.user;
 
   const from = req.query.from ? parseDate(req.query.from) : null;
   const to = req.query.to ? parseDate(req.query.to) : null;
 
-  // Filter by role
-  let data = [...ORDERS];
+  const where = [];
+  const params = [];
+
+  // affiliate sees only their discount code
   if (user.role === "affiliate") {
-    const code = normalizeCode(user.discountCode);
-    data = data.filter((o) => normalizeCode(o.discount) === code);
+    params.push(normalizeCode(user.discountCode));
+    where.push(`LOWER(COALESCE(discount_code,'')) = $${params.length}`);
   }
 
-  // Filter by date range (if provided)
-  if (from || to) {
-    data = data.filter((o) => inRange(o.created, from, to));
+  // date filters (optional)
+  if (from) {
+    params.push(from.toISOString());
+    where.push(`created_at >= $${params.length}`);
+  }
+  if (to) {
+    // include whole day: set end to 23:59:59.999
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    params.push(end.toISOString());
+    where.push(`created_at <= $${params.length}`);
   }
 
-  // Metrics
-  const total = data.reduce((s, o) => s + toNumber(o.total), 0);
-  const commission = total * 0.1;
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  const codPill =
-    user.role === "affiliate" && user.discountCode
-      ? `<div class="pill">Cod reducere: ${escapeHtml(user.discountCode)}</div>`
-      : user.role === "admin"
-      ? `<div class="pill">Admin: poți încărca CSV și gestiona datele</div>`
-      : "";
+  try {
+    const list = await pool.query(
+      `
+      SELECT
+        order_name AS "order",
+        created_at AS "createdAt",
+        financial_status AS "status",
+        discount_code AS "discount",
+        total::float AS "total"
+      FROM orders
+      ${whereSql}
+      ORDER BY created_at DESC NULLS LAST, id DESC
+      LIMIT 500;
+    `,
+      params
+    );
 
-  const uploadBox =
-    user.role === "admin"
-      ? `
+    const data = list.rows.map((r) => ({
+      order: r.order || "",
+      created: r.createdAt ? new Date(r.createdAt).toISOString().slice(0, 10) : "",
+      status: r.status || "",
+      discount: r.discount || "",
+      total: toNumber(r.total || 0),
+    }));
+
+    // Metrics
+    const total = data.reduce((s, o) => s + toNumber(o.total), 0);
+    const commission = total * 0.1;
+
+    const codPill =
+      user.role === "affiliate" && user.discountCode
+        ? `<div class="pill">Cod reducere: ${escapeHtml(user.discountCode)}</div>`
+        : user.role === "admin"
+        ? `<div class="pill">Admin: poți încărca CSV și gestiona datele</div>`
+        : "";
+
+    const uploadBox =
+      user.role === "admin"
+        ? `
 <div class="card">
   <h3>Încarcă CSV (Shopify Orders export)</h3>
-  <div class="muted">Încarcă exportul de comenzi din Shopify. Datele se păstrează în memorie cât rulează instanța.</div>
+  <div class="muted">CSV-ul este importat în baza de date (Postgres), deci datele rămân salvate.</div>
 
   <form method="post" action="/upload" enctype="multipart/form-data" style="margin-top:12px">
     <div class="row">
@@ -379,26 +446,25 @@ app.get("/dashboard", requireAuth, (req, res) => {
   <div class="footer-note">Tip: dacă nu apar comenzile, verificăm coloanele din CSV (Discount Code, Created at, Total, Name).</div>
 </div>
 `
-      : "";
+        : "";
 
-  const rows =
-    data.length === 0
-      ? `<tr><td colspan="5" class="muted">Nu există comenzi pentru criteriile selectate.</td></tr>`
-      : data
-          .slice(0, 500)
-          .map(
-            (o) => `
+    const rows =
+      data.length === 0
+        ? `<tr><td colspan="5" class="muted">Nu există comenzi pentru criteriile selectate.</td></tr>`
+        : data
+            .map(
+              (o) => `
 <tr>
   <td>${escapeHtml(o.order)}</td>
   <td>${escapeHtml(o.created)}</td>
   <td>${escapeHtml(o.status)}</td>
   <td>${escapeHtml(o.discount || "")}</td>
-  <td>${escapeHtml(String(o.total))}</td>
+  <td>${escapeHtml(String(o.total.toFixed(2)))}</td>
 </tr>`
-          )
-          .join("");
+            )
+            .join("");
 
-  const body = `
+    const body = `
 <div class="grid">
   <div class="card">
     <h3>Raport</h3>
@@ -426,7 +492,7 @@ app.get("/dashboard", requireAuth, (req, res) => {
         <div class="v">${data.length}</div>
       </div>
       <div class="stat">
-        <div class="k">Total vânzări (din CSV)</div>
+        <div class="k">Total vânzări (din DB)</div>
         <div class="v">${total.toFixed(2)}</div>
       </div>
       <div class="stat">
@@ -454,12 +520,26 @@ app.get("/dashboard", requireAuth, (req, res) => {
 </div>
 `;
 
-  res.send(layout("Dashboard", body, user));
+    res.send(layout("Dashboard", body, user));
+  } catch (e) {
+    console.error("Dashboard error:", e);
+    res
+      .status(500)
+      .send(
+        layout(
+          "Eroare",
+          `<div class="card"><h3>Eroare</h3><div class="danger">${escapeHtml(
+            e.message
+          )}</div><a class="btn" href="/dashboard">Înapoi</a></div>`,
+          req.session.user
+        )
+      );
+  }
 });
 
 /* ================= CSV UPLOAD (ADMIN only) ================= */
 
-app.post("/upload", requireAuth, upload.single("file"), (req, res) => {
+app.post("/upload", requireAuth, upload.single("file"), async (req, res) => {
   const user = req.session.user;
   if (user.role !== "admin") return res.sendStatus(403);
 
@@ -469,23 +549,78 @@ app.post("/upload", requireAuth, upload.single("file"), (req, res) => {
 
     const records = parse(content, { columns: true, skip_empty_lines: true });
 
-    // Shopify Orders export: typical columns: Name, Created at, Financial Status, Discount Code, Total
-    ORDERS = records.map((r) => ({
-      order: r["Name"] || r["Order"] || "",
-      created: r["Created at"] || r["Created"] || r["Created At"] || "",
-      status: r["Financial Status"] || r["Status"] || "",
-      discount: (r["Discount Code"] || r["Discount"] || "").trim(),
-      total: toNumber(r["Total"] || r["Total price"] || r["Current total price"] || 0),
-    }));
+    // Transform to normalized objects
+    const mapped = records.map((r) => {
+      const order = (r["Name"] || r["Order"] || "").trim();
+      const createdRaw = (r["Created at"] || r["Created"] || r["Created At"] || "").trim();
+      const createdAt = parseDate(createdRaw);
+      const status = (r["Financial Status"] || r["Status"] || "").trim();
+      const discount = (r["Discount Code"] || r["Discount"] || "").trim();
+      const total = toNumber(r["Total"] || r["Total price"] || r["Current total price"] || 0);
+
+      // source_hash = cheie unică pt deduplicare (nu dublezi la re-upload)
+      // folosim: order + created + total + discount
+      const sourceHash = normalizeCode(`${order}|${createdRaw}|${total}|${discount}`);
+
+      return { order, createdAt, status, discount, total, sourceHash };
+    });
+
+    // Insert in DB (ignore duplicates)
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const q = `
+        INSERT INTO orders (order_name, created_at, financial_status, discount_code, total, source_hash)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (source_hash) DO NOTHING;
+      `;
+
+      for (const o of mapped) {
+        await client.query(q, [
+          o.order || "",
+          o.createdAt ? o.createdAt.toISOString() : null,
+          o.status || null,
+          o.discount || null,
+          o.total,
+          o.sourceHash,
+        ]);
+      }
+
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
 
     res.redirect("/dashboard");
   } catch (e) {
     console.error("CSV upload error:", e);
-    res.status(400).send(layout("Eroare", `<div class="card"><h3>Eroare la CSV</h3><div class="danger">${escapeHtml(e.message)}</div><a class="btn" href="/dashboard">Înapoi</a></div>`, req.session.user));
+    res
+      .status(400)
+      .send(
+        layout(
+          "Eroare",
+          `<div class="card"><h3>Eroare la CSV</h3><div class="danger">${escapeHtml(
+            e.message
+          )}</div><a class="btn" href="/dashboard">Înapoi</a></div>`,
+          req.session.user
+        )
+      );
   }
 });
 
 /* ================= START ================= */
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("Server running on", PORT));
+
+initDb()
+  .then(() => {
+    app.listen(PORT, () => console.log("Server running on", PORT));
+  })
+  .catch((e) => {
+    console.error("DB init failed:", e);
+    process.exit(1);
+  });
